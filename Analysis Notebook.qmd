@@ -1,0 +1,1234 @@
+---
+title: "Analysis Notebook"
+author: "S Bisetty (2874956), FJ Van Wyk (24880159), C Twaddle (23560444)"
+format: html
+editor: visual
+---
+
+# Assignment 3
+
+## Packages
+
+```{r}
+#Load Packages
+
+library(tidyverse)
+library(tidytext)
+library(topicmodels)
+library(tm)
+library(textdata)
+library(wordcloud)
+library(cowplot)
+library(ggwordcloud)
+library(gridtext)
+library(reshape2)
+library(tokenizers)
+library(sentimentr)
+library(fmsb)
+library(hrbrthemes)
+library(RColorBrewer)
+library(rmarkdown)
+library(kableExtra)
+library(gridExtra)
+library(forcats)
+library(ggthemes)
+```
+
+## Load Dataset
+
+```{r}
+#Import data set 
+pub_data <- read.csv("data/IS_publications_2011_2020.csv")
+
+#General Tidying
+data <- read.csv("data/IS_publications_2011_2020.csv") |> 
+  mutate(linenumber = row_number()) |> 
+  mutate(access_type = ifelse(is.na(open_access), "Limited Access", "Open Access"))
+
+data(stop_words)
+
+unique_years <- unique(data$Year)
+
+#Read dataset
+dat <- read.csv("data/IS_publications_2011_2020.csv")
+
+
+pub_dat <- dat |> 
+  group_by(Authors) |> 
+  select(Authors, Title, Year, cited_by, pub_type, source_title, author_keywords) 
+
+na_indices <- which(is.na(pub_dat$cited_by))
+
+# Replace NA values with 0 at the identified indices
+pub_dat$cited_by[na_indices] <- 0
+
+#Create author dataframe
+authors_dat <- dat |> 
+  #Seperate individual authors
+  unnest_tokens(authors, Authors, token = "regex", pattern = ",") |> 
+  select(authors, Title, Year, cited_by, source_title, pub_type, pub_type)
+authors_dat$authors <- trimws(authors_dat$authors)
+authors_dat$authors <- gsub("\\bjr", "", authors_dat$authors)
+authors_dat <- authors_dat[authors_dat$authors != ".", ]
+authors_dat[is.na(authors_dat)] <- 0
+```
+
+## **1. Most Common Topics and Themes in IS Research (2011-2020)**
+
+### Tidy Dataset
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#List to hold specific stop words
+specificStops <-  c("information", "systems", "also","can","however", "research", "study", "based", "two")
+
+#Remove rows with missing abstracts
+clean_abstracts <- pub_data[!is.na(pub_data$Abstract),]
+
+#Create corpus from abstracts
+corpus_abstract <- Corpus(VectorSource(pub_data$Abstract))
+
+#Clean Corpus
+#lowercase conversion
+corpus_abstract <- tm_map(corpus_abstract, content_transformer(tolower))
+#remove punctuation 
+corpus_abstract <- tm_map(corpus_abstract, removePunctuation)
+#remove numbers 
+corpus_abstract <- tm_map(corpus_abstract, removeNumbers)
+#remove stopwords
+corpus_abstract <- tm_map(corpus_abstract, removeWords, stopwords("en")) 
+
+corpus_abstract <- tm_map(corpus_abstract, removeWords, specificStops) 
+#remove extra whitespaces
+corpus_abstract <- tm_map(corpus_abstract, stripWhitespace)
+
+#Document-term matrix (dtm)
+dtm_abstract <- DocumentTermMatrix(corpus_abstract)
+```
+
+### K Calculation
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+result <- FindTopicsNumber(
+ dtm_abstract, # our dtm
+ topics = seq(from = 2, to = 10, by = 1),
+ metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
+ method = "Gibbs",
+ control = list(seed = 42),
+ mc.cores = 8L, #number of cores to use, adjust based on your machine
+ verbose = TRUE )
+
+FindTopicsNumber_plot(result)
+```
+
+### LDA topic model
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#Fit to LDA topic model
+lda_model_abstract <- LDA(dtm_abstract, k = 10)
+
+#most common terms for each topic
+terms_abstract <- terms(lda_model_abstract, 10) 
+
+#Display terms 
+kable(terms_abstract) |> 
+  kable_styling(latex_options = "striped", full_width=FALSE)
+```
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+
+# Convert terms_abstract to a data frame
+terms_df <- as.data.frame(terms_abstract)
+
+# Add a column for topic numbers
+terms_df$Topic <- row.names(terms_df)
+
+# Reshape the data for plotting
+terms_df_long <- pivot_longer(terms_df, -Topic, names_to = "Rank", values_to = "Term")
+
+# Plot
+ggplot(terms_df_long, aes(x = Term, y = Topic, fill = Topic)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Term", y = " ", fill = "Topic") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_blank()
+    )
+```
+
+```{r}
+abstract_topics <- tidy(lda_model_abstract, matrix = "beta")
+
+ap_top_terms <- abstract_topics |> 
+  group_by(topic) |> 
+  slice_max(beta, n = 10) |> 
+  ungroup() |> 
+  arrange(topic, -beta)
+
+ap_top_terms |> 
+  mutate(term = reorder_within(term, beta, topic)) |> 
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  labs(title ="Frequency of terms per topic")+
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered() + theme_minimal()
+```
+
+## 2. Evolution of IS Research Topics and Themes (2011-2020)
+
+### Tidy Dataset
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#Process text
+
+processed_abstract <- textProcessor(pub_data$Abstract, metadata = pub_data)
+
+#Create datasets for STM
+out <- prepDocuments(processed_abstract$documents, processed_abstract$vocab, processed_abstract$meta)
+
+docs <- out$documents
+vocab <- out$vocab
+meta <- out$meta
+
+str(meta)
+
+#Not sure if we need this...
+#Specifying STM
+test_STM <- stm(documents = out$documents, 
+                vocab = out$vocab,
+                K = 10,
+                prevalence =~ factor(Year),
+                max.em.its = 75,
+                data = out$meta,
+                init.type = "Spectral", verbose = FALSE)
+
+plot(test_STM)
+labelTopics(test_STM)
+
+# Estimate effect of Year on topics
+predict_topics <- estimateEffect(formula = 1:10 ~ Year, stmobj = test_STM, metadata = out$meta, uncertainty = "Global")
+
+
+```
+
+### Generate Graphs (using STM)
+
+#### Topic 1: Technology and Digitization
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#Plot the effect of time on a topic 1
+plot(predict_topics, "Year", method = "continuous", topics = 1, model = z, printlegend = FALSE, xaxt = "n", xlab = "Time (Year)")  
+#Sequence of years 
+yearseq <- seq(from = min(out$meta$Year), to = max(out$meta$Year), by = 1)  
+#Labels on axis - years 
+axis(1, at = yearseq, labels = yearseq) 
+
+```
+
+#### Topic 2: User Influence and Effects
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#Plot the effect of time on a topic 2
+plot(predict_topics, "Year", method = "continuous", topics = 2, model = z, printlegend = FALSE, xaxt = "n", xlab = "Time (Year)")  
+#Sequence of years 
+yearseq <- seq(from = min(out$meta$Year), to = max(out$meta$Year), by = 1)  
+#Labels on axis - years 
+axis(1, at = yearseq, labels = yearseq) 
+```
+
+#### Topic 3: Mobile and App Design
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#Plot the effect of time on a topic 3
+plot(predict_topics, "Year", method = "continuous", topics = 3, model = z, printlegend = FALSE, xaxt = "n", xlab = "Time (Year)")  
+#Sequence of years 
+yearseq <- seq(from = min(out$meta$Year), to = max(out$meta$Year), by = 1)  
+#Labels on axis - years 
+axis(1, at = yearseq, labels = yearseq) 
+```
+
+#### Topic 4: Research Methodologies and Approaches
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#Plot the effect of time on a topic 4
+plot(predict_topics, "Year", method = "continuous", topics = 4, model = z, printlegend = FALSE, xaxt = "n", xlab = "Time (Year)")
+#Sequence of years 
+yearseq <- seq(from = min(out$meta$Year), to = max(out$meta$Year), by = 1)  
+#Labels on axis - years 
+axis(1, at = yearseq, labels = yearseq) 
+```
+
+#### Topic 5: Knowledge Management and Collaboration
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#Plot the effect of time on a topic 5
+plot(predict_topics, "Year", method = "continuous", topics = 5, model = z, printlegend = FALSE, xaxt = "n", xlab = "Time (Year)")  
+#Sequence of years 
+yearseq <- seq(from = min(out$meta$Year), to = max(out$meta$Year), by = 1)  
+#Labels on axis - years 
+axis(1, at = yearseq, labels = yearseq) 
+```
+
+#### Topic 6: Social Media and Online Communities
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#Plot the effect of time on a topic 6
+plot(predict_topics, "Year", method = "continuous", topics = 6, model = z, printlegend = FALSE, xaxt = "n", xlab = "Time (Year)")  
+#Sequence of years 
+yearseq <- seq(from = min(out$meta$Year), to = max(out$meta$Year), by = 1)  
+#Labels on axis - years 
+axis(1, at = yearseq, labels = yearseq) 
+```
+
+#### Topic 7: Business Innovation and Digital Transformation
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#Plot the effect of time on a topic 7
+plot(predict_topics, "Year", method = "continuous", topics = 7, model = z, printlegend = FALSE, xaxt = "n", xlab = "Time (Year)")  
+#Sequence of years 
+yearseq <- seq(from = min(out$meta$Year), to = max(out$meta$Year), by = 1)  
+#Labels on axis - years 
+axis(1, at = yearseq, labels = yearseq) 
+```
+
+#### Topic 8: Information Security and Risk Management
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#Plot the effect of time on a topic 8
+plot(predict_topics, "Year", method = "continuous", topics = 8, model = z, printlegend = FALSE, xaxt = "n", xlab = "Time (Year)")  
+#Sequence of years 
+yearseq <- seq(from = min(out$meta$Year), to = max(out$meta$Year), by = 1)  
+#Labels on axis - years 
+axis(1, at = yearseq, labels = yearseq) 
+```
+
+#### Topic 9: E-commerce and Consumer Behaviour
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#Plot the effect of time on a topic 9
+plot(predict_topics, "Year", method = "continuous", topics = 9, model = z, printlegend = FALSE, xaxt = "n", xlab = "Time (Year)")  
+#Sequence of years 
+yearseq <- seq(from = min(out$meta$Year), to = max(out$meta$Year), by = 1)  
+#Labels on axis - years 
+axis(1, at = yearseq, labels = yearseq) 
+```
+
+#### Topic 10: Data Management and Healthcare
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#Plot the effect of time on a topic 10
+plot(predict_topics, "Year", method = "continuous", topics = 10, model = z, printlegend = FALSE, xaxt = "n", xlab = "Time (Year)")  
+#Sequence of years 
+yearseq <- seq(from = min(out$meta$Year), to = max(out$meta$Year), by = 1)  
+#Labels on axis - years 
+axis(1, at = yearseq, labels = yearseq) 
+
+```
+
+## **3. Most Productive Authors and Journals in the Field of IS**
+
+### Creating Dataframes
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#Generate Mean publications
+mean_publications <- authors_dat |> 
+  group_by(authors) |> 
+  count(authors, sort = TRUE) |> 
+  summarise(total_publications = sum(n),
+            total_authors = n(),
+            mean_pub = total_publications / total_authors)
+
+#Find the rate of publication
+rate_aut <- authors_dat |> 
+  group_by(authors_dat$authors) |> 
+  mutate(first_pub = min(authors_dat$Year), last_pub = max(authors_dat$Year), total = n()) |> 
+  mutate(pub_rate = total/(last_pub - first_pub)) |> 
+  ungroup()
+
+#Count number of authors per publication
+authorship<-  pub_dat |> 
+  group_by(Title) |> 
+  mutate(author_count = (str_count(Authors, pattern = ",") + 1 ))
+
+
+#Create 
+auth_journ_p <- pub_dat |> 
+  filter(pub_type == "journal") |> 
+  select(Title, source_title, cited_by, Authors) |> 
+  group_by(source_title) |> 
+  summarise(total_citations = sum(cited_by), total_pubs = n()) |> 
+  mutate(cite_rate = (total_pubs/total_citations)*100)
+
+
+```
+
+### Generate Graphs
+
+### Authors
+
+#### Total Publications per Author
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+authors_dat |> 
+  count(authors, sort = TRUE) |> 
+  filter(n > 50 ) |> 
+  mutate(authors = reorder(authors, n)) |> 
+  ggplot(aes(n, authors, fill = authors)) +
+  geom_col(show.legend = FALSE) +
+  labs(y = NULL, x = "Total Publications", title = "Total publications per author") +   theme_clean()
+```
+
+#### Publication Rate Per Author
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#Spaghetti solution
+rate_sorted <- rate_aut[order(-rate_aut$pub_rate), ]
+top_aut <- unique(rate_sorted$authors)[1:10]
+top_rate <- unique( rate_sorted$pub_rate)[1:10]
+top_rate <- round(top_rate, 0)
+df_top_aut <- data.frame(top_aut, top_rate)
+df_top_aut <- df_top_aut[order(top_rate), ]
+
+#Plot graph
+df_top_aut |> 
+  ggplot(aes(top_rate, top_aut, fill = top_aut)) +
+  geom_col(show.legend = FALSE) +
+  labs(y = NULL, x = "Publication rate", title = "Publication Rate Per Author") + 
+  theme_clean()
+```
+
+#### Citations per Author
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+plot_auth_cite <- authors_dat |> 
+  filter(cited_by > 1500) |> 
+  ggplot(aes(x = cited_by, y = authors, fill  = authors)) +
+  geom_col(show.legend = FALSE) +
+  labs(y = NULL, title = "Citations per author", x = "Citations") + 
+  theme_clean()
+plot_auth_cite
+```
+
+#### Citations per publishing type by number of authors
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+plot3 <- authorship |> 
+  ggplot(aes( x = author_count, y = cited_by, fill = pub_type))+
+  geom_histogram(stat ="identity", position = "stack", binwidth = 1)+
+  scale_fill_manual(values = c("cornflowerblue", "tomato"))+
+  theme_minimal()+
+  ylim(0, 3500)+
+  labs(y = "Citations", x = "Authors", title = "Citations per number of authors per publishing type")  
+
+plot3
+```
+
+### Journals
+
+#### Most productive authors and journals by citations
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+auth_journ <- authors_dat |> 
+  select(Title, source_title, cited_by, authors) |> 
+  filter(cited_by > 800) |> 
+  group_by(source_title) |> 
+  ggplot(aes(x = cited_by, y = authors, fill  = source_title)) +
+  geom_col(stat = "identity")+ 
+  labs(x = "Citations", y = "Authors", title = "Publications by Journal for Top Authors") +
+  theme_clean()
+auth_journ
+```
+
+#### Most Productive authors and journals by citation (MIS Quarterly Excluded)
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+auth_journ_ex <- authors_dat |> 
+  select(Title, source_title, cited_by, authors) |> 
+  filter(cited_by > 500 & source_title != "MIS Quarterly: Management Information Systems") |> 
+  group_by(source_title) |> 
+  ggplot(aes(x = cited_by, y = authors, fill  = source_title)) +
+  geom_col(stat = "identity")+ 
+  labs(x = "Citations", y = "Authors", title = "Publications by Journal for Top Authors") +
+  theme_clean()
+auth_journ_ex
+```
+
+#### Journals By number of publications and Citations
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+ggplot(auth_journ_p, aes(y = total_pubs, x = source_title, size = total_citations, color = source_title)) +
+  geom_point(aplha = 0.5, aes(size = auth_journ_p$total_citations)) +
+  labs(x = "Total Citations", y = "Total Articles", title = "Total Publications and Citations per Journal") +
+  theme_clean()+
+  geom_segment( aes(x=source_title, xend=source_title, y=0, yend=total_pubs), size = 1)+
+  theme(axis.text.x = element_text(angle = 40, hjust = 1))
+```
+
+### Most Frequent Sources
+
+```{r fig.width=12, fig.height=6}
+#| echo: false
+#| warning: false
+#| message: false
+
+#cut data to source info and change formats and names
+journals_data <- data |>
+  select(source_name, source_title) |> 
+  mutate(year = str_extract(source_title, "\\d{4}")) |> 
+  mutate(source_name = ifelse(!is.na(year), paste(source_name, year, sep = " "), source_name)) |> 
+  select(-year) |> 
+   na.omit() |>
+  count(source_name, sort = TRUE) |>
+  mutate(source_name = reorder(source_name, n)) |>
+  head(15)
+
+#extract titles from cut dataset
+top_15_journals <- unique(journals_data$source_name)
+
+#create lollipop graph
+journals_pop <- journals_data |>
+  ggplot(aes(reorder(source_name, desc(n)), n)) +
+  geom_point(size = 4, color = "#440d54") +
+  geom_segment(aes(y=0, yend=n, x=source_name, xend=source_name), color = "#440d54", size = 2)+
+  labs(title ="Journals and Conferences with the most papers published",
+       x = "Source",
+       y = "Paper count") +
+  theme_ipsum(base_family = "sans") +
+  theme(axis.title.x = element_text(hjust = 0.5, margin = margin(t = 15, r = 0, b = 0, l = 0)),
+        axis.title.y = element_text(hjust = 0.5, margin = margin(t = 0, r = 15, b = 15, l = 0)),
+        axis.text.x = element_text(angle = 90),
+        text = element_text(size = 12))
+journals_pop
+```
+
+### Source abbreviation key
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+
+#create table to expand abbreviations
+key_table <- data |>
+  distinct(source_name, source_title) |> 
+  mutate(year = str_extract(source_title, "\\d{4}")) |> 
+  mutate(source_name = ifelse(!is.na(year), paste(source_name, year, sep = " "), source_name)) |>
+  filter(source_name %in% top_15_journals) |> 
+  select(-year)
+colnames(key_table)[colnames(key_table) == "source_name"] <- "Source Abbreviation"
+colnames(key_table)[colnames(key_table) == "source_title"] <- "Full Source Name"
+key_table |> 
+  kable() |> 
+  kable_styling(latex_options = "striped", font_size = 8) |> 
+  column_spec(c(1,2), width = c("10em","30em"))
+```
+
+### Most influential sources
+
+```{r fig.width=12, fig.height=6}
+#| echo: false
+#| warning: false
+#| message: false
+
+#cut data and select based on citation counts
+journals_data_by_cites <- data |>
+  select(source_name, source_title, cited_by) |> 
+  mutate(year = str_extract(source_title, "\\d{4}")) |> 
+  mutate(source_name = ifelse(!is.na(year), paste(source_name, year, sep = " "), source_name)) |> 
+  select(-year) |>
+  na.omit() |> 
+  group_by(source_name) |> 
+  summarize(total_cited = sum(cited_by)) |> 
+  ungroup() |> 
+  head(15)
+
+top_15_journals_by_cite <- unique(journals_data_by_cites$source_name)
+
+#create lollipop graph
+journals_pop_by_cite <- journals_data_by_cites |>
+  ggplot(aes(reorder(source_name, desc(total_cited)), total_cited)) +
+  geom_point(size = 4, color = "#440d54") +
+  geom_segment(aes(y=0, yend=total_cited, x=source_name, xend=source_name), color = "#440d54", size = 2)+
+  labs(title ="Journals and Conferences with the most papers published",
+       x = "Source",
+       y = "Paper count") +
+  theme_ipsum(base_family = "sans") +
+  theme(axis.title.x = element_text(hjust = 0.5, margin = margin(t = 15, r = 0, b = 0, l = 0)),
+        axis.title.y = element_text(hjust = 0.5, margin = margin(t = 0, r = 15, b = 15, l = 0)),
+        axis.text.x = element_text(angle = 90),
+        text = element_text(size = 12))
+journals_pop_by_cite
+
+```
+
+### Source abbreviation key
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+
+#create table to expand abbreviations
+key_table_by_cite <- data |>
+  distinct(source_name, source_title) |> 
+  mutate(year = str_extract(source_title, "\\d{4}")) |> 
+  mutate(source_name = ifelse(!is.na(year), paste(source_name, year, sep = " "), source_name)) |>
+  filter(source_name %in% top_15_journals_by_cite) |> 
+  select(-year)
+colnames(key_table_by_cite)[colnames(key_table_by_cite) == "source_name"] <- "Source Abbreviation"
+colnames(key_table_by_cite)[colnames(key_table_by_cite) == "source_title"] <- "Full Source Name"
+key_table_by_cite |> 
+  kable() |> 
+  kable_styling(latex_options = "striped", font_size = 8) |> 
+  column_spec(c(1,2), width = c("10em","30em"))
+```
+
+## 4. Impact of IS research (Measured by Citation Counts)
+
+### Generate Graphs
+
+#### Top Cited Overall
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+
+#cut and sort data
+top_cited <- data |> 
+  select(Title, Authors, Year, cited_by) |> 
+  arrange(desc(cited_by)) |> 
+  mutate("Cited By" = format(cited_by, big.mark = " ")) |> 
+  select(-cited_by) |> 
+  head(10)
+
+#create a styled table
+kable(top_cited) |> 
+  kable_styling(latex_options = "striped", full_width = FALSE) |> 
+  column_spec(c(1,2), width = "15em")
+```
+
+#### Top cited papers for each year
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+
+#create empty df to populate later
+top_articles <- data.frame(Title = character(),
+                           Authors = character(),
+                           Year = integer(),
+                           Cited_By = integer(),
+                           stringsAsFactors = FALSE)
+
+#for loop to extract the top paper from each year and add it to the empty df
+for (year in unique_years) {
+  top_cited_yearly <- data |> 
+    select(Title, Authors, Year, cited_by) |>
+    filter(Year == year) |> 
+    slice(which.max(cited_by))
+  top_articles <- rbind(top_articles, top_cited_yearly)
+  
+}
+
+kable(top_articles) |> 
+  kable_styling(latex_options = "striped", full_width = FALSE) |> 
+  column_spec(c(1,2), width = "15em")
+```
+
+## 5. **Most Frequent Keywords in IS and How They Have Changed Over Time**
+
+### Author Keywords
+
+#### Tidy Dataset
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+
+#extract and tokenise keywords
+auth_keyphrases <- data |> 
+  select(Authors, Title, Abstract, author_keywords, index_keywords, Year, linenumber, access_type, pub_type) |> 
+  unnest_tokens(word, author_keywords,token = 'regex', pattern=";") |> 
+  anti_join(stop_words) 
+
+#remove white space
+auth_keyphrases$word <- trimws(auth_keyphrases$word) 
+```
+
+#### Generate Graphs
+
+##### Over 10 Years
+
+```{r fig.width=12, fig.height=8}
+#| echo: false
+#| warning: false
+#| message: false
+auth_keyphrases |> 
+  na.omit() |> 
+  count(word, sort = TRUE) |> 
+  mutate(word = reorder(word, n)) |> 
+  head(15) |>
+  ggplot(aes(n, word)) +
+  geom_col(fill = "#440d54") +
+  labs(y = NULL,
+       title = "Top 20 most frequent author key words",
+       subtitle = "Over 10 years" ) + 
+  theme_ipsum(base_family = "sans",
+              plot_margin = margin(10, 10, 10, 10))+
+  theme(axis.title.x = element_text(size = 13, hjust = 0.5, margin = margin(t = 15, r = 0, b = 0, l = 0)),
+        axis.title.y = element_text(size = 13, hjust = 0.5, margin = margin(t = 0, r = 15, b = 15, l = 0)),
+        text = element_text(size = 15))
+```
+
+```{r fig.width=10, fig.height=8}
+#| echo: false
+#| warning: false
+#| message: false
+
+auth_keyphrases |> 
+  count(word) |> 
+  arrange(desc(n)) |> 
+  slice_head(n = 100) |> 
+  ggplot(aes(label = word, size = n, color = word)) +
+  geom_text_wordcloud_area(rm_outside = TRUE) +
+  scale_size_area(max_size = 40) +
+  scale_color_manual(values = colorRampPalette(brewer.pal(n=100, name = "Dark2"))(99)) +
+  labs(title = "World Cloud of Author Keywords")+
+  theme_ipsum(base_family = "sans")
+```
+
+##### By year
+
+```{r fig.height=15, fig.width=12}
+#| echo: false
+#| warning: false
+#| message: false
+
+#empty list to store graphs
+author_plots <- list()
+#custom colour palette
+colors <- c("#9e0142", "#d53e4f", "#f46d43", "#fdae61", "#fee08b", "#e6f598", "#abdda4", "#66c2a5", "#3288bd", "#5e4fa2")
+
+#for loop to generate a graph for each year
+for (i in seq_along(unique_years)) {
+  year <- unique_years[i]
+  data_year <- auth_keyphrases |> 
+    filter(Year == year) |> 
+    count(word, sort = TRUE) |> 
+    mutate(word = reorder(word, n)) |> 
+    head(10) |> 
+    na.omit()
+  
+ plot <- ggplot(data_year, aes(n, word, fill = as.factor(year))) +
+    geom_col(show.legend = F) +
+    labs(y = NULL,
+         title = paste("Bar Graph for ", year))  + 
+   scale_fill_manual(values = colors[i]) +
+   theme_ipsum(base_family = "sans",
+              plot_margin = margin(10, 10, 10, 10))+
+   theme(axis.title.x = element_text(size = 13, hjust = 0.5, margin = margin(t = 15, r = 0, b = 0, l = 0)),
+        axis.title.y = element_text(size = 13, hjust = 0.5, margin = margin(t = 0, r = 15, b = 15, l = 0)),
+        text = element_text(size = 12))
+  
+ author_plots[[length(author_plots) + 1]] <- plot
+}
+
+#present all graphs at once
+plot_grid(plotlist = rev(author_plots), ncol = 2)
+```
+
+##### Open Access vs Limited Access
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+auth_keyphrases |> 
+  na.omit() |>
+  count(word, access_type, sort = T) |> 
+  acast(word ~ access_type, value.var = "n", fill = 0) |>  
+  comparison.cloud(colors = brewer.pal(n=2, name = "Set1"),
+                   max.words = 100)
+```
+
+##### Conference Papers vs Journal Papers
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+auth_keyphrases |> 
+  na.omit() |> 
+  count(word, pub_type, sort = T) |> 
+  acast(word ~ pub_type, value.var = "n", fill = 0) |> 
+  comparison.cloud(colors = brewer.pal(n=2, name = "Set1"),
+                   max.words = 100)
+```
+
+### Index Key Phrases
+
+#### Tidy Dataset
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+
+#extract and tokenise keywords
+index_keyphrases <- data |> 
+  select(Authors, Title, Abstract, author_keywords, index_keywords, Year, linenumber, access_type, pub_type) |>
+  unnest_tokens(word, index_keywords, token = 'regex', pattern=";") |> 
+  anti_join(stop_words)
+
+index_keyphrases$word <- trimws(index_keyphrases$word) 
+
+```
+
+#### Generate Graphs
+
+##### Over 10 Years
+
+```{r fig.width=12, fig.height=8}
+#| echo: false
+#| warning: false
+#| message: false
+
+index_keyphrases |> 
+  count(word, sort = TRUE) |> 
+  mutate(word = reorder(word, n)) |> 
+  head(15) |> 
+  ggplot(aes(n, word)) +
+  geom_col(fill = "#440d54") +
+  labs(y = NULL,
+       title = "Top 20 most frequent index key words",
+       subtitle = "Over 10 years" ) + 
+  theme_ipsum(base_family = "sans",
+              plot_margin = margin(10, 10, 10, 10))+
+  theme(axis.title.x = element_text(size = 13, hjust = 0.5, margin = margin(t = 15, r = 0, b = 0, l = 0)),
+        axis.title.y = element_text(size = 13, hjust = 0.5, margin = margin(t = 0, r = 15, b = 15, l = 0)),
+        text = element_text(size = 15))
+
+```
+
+```{r fig.width=10, fig.height=8}
+#| echo: false
+#| warning: false
+#| message: false
+index_keyphrases |> 
+  count(word) |> 
+  arrange(desc(n)) |> 
+  slice_head(n = 100) |> 
+  ggplot(aes(label = word, size = n, color = word)) +
+  geom_text_wordcloud_area() +
+  scale_size_area(max_size = 50)+
+  scale_color_manual(values = colorRampPalette(brewer.pal(n=100, name = "Dark2"))(99)) +
+  labs(title = "World Cloud of Index Keywords")+
+  theme_ipsum(base_family = "sans")
+```
+
+##### By Year
+
+```{r fig.height=15, fig.width=12}
+#| echo: false
+#| warning: false
+#| message: false
+
+index_plots <- list()
+colors <- c("#9e0142", "#d53e4f", "#f46d43", "#fdae61", "#fee08b", "#e6f598", "#abdda4", "#66c2a5", "#3288bd", "#5e4fa2")
+
+#for loop to create new graphs for every year
+for (i in seq_along(unique_years)) {
+  year <- unique_years[i]
+  data_year <- index_keyphrases |> 
+    filter(Year == year) |> 
+    count(word, sort = TRUE) |> 
+    mutate(word = reorder(word, n)) |> 
+    head(10) |> 
+    na.omit()
+  
+  plot <- ggplot(data_year, aes(n, word, fill = as.factor(year))) +
+    geom_col(show.legend = F) +
+    labs(y = NULL,
+         title = paste("Bar Graph for ", year))  + 
+   scale_fill_manual(values = colors[i]) +
+   theme_ipsum(base_family = "sans",
+              plot_margin = margin(10, 10, 10, 10))+
+   theme(axis.title.x = element_text(size = 13, hjust = 0.5, margin = margin(t = 15, r = 0, b = 0, l = 0)),
+        axis.title.y = element_text(size = 13, hjust = 0.5, margin = margin(t = 0, r = 15, b = 15, l = 0)),
+        text = element_text(size = 15))
+  
+ index_plots[[length(index_plots) + 1]] <- plot
+}
+
+#present all graphs at once
+plot_grid(plotlist = rev(index_plots), ncol = 2)
+```
+
+##### Open Access vs Limited Access
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+index_keyphrases |> 
+  count(word, access_type, sort = T) |> 
+  acast(word ~ access_type, value.var = "n", fill = 0) |> 
+  comparison.cloud(colors = brewer.pal(n=2, name = "Set1"),
+                   max.words = 100)
+```
+
+##### Conference Papers vs Journal Papers
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+index_keyphrases |> 
+  na.omit() |> 
+  count(word, pub_type, sort = T) |> 
+  acast(word ~ pub_type, value.var = "n", fill = 0) |> 
+  comparison.cloud(colors = brewer.pal(n=2, name = "Set1"),
+                   max.words = 100)
+```
+
+## 6. **Relationship Between Specific Topics and Themes and Citation Counts**
+
+### Tidy Dataset
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+keywords_dat <- dat |> 
+  select(Authors, author_keywords, Title, Year, cited_by) |> 
+  unnest_tokens( keys, author_keywords, token = "regex", pattern = ";" ) |> 
+  group_by(keys) |> 
+  summarise(total_citations = sum(cited_by)) |> 
+  ungroup() 
+
+#Fix NA's
+na_indices <- which(is.na(keywords_dat$total_citations))
+
+# Replace NA values with 0 at the identified indices
+keywords_dat$total_citations[na_indices] <- 0
+```
+
+### Generate Graphs
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+plot_cite_keys <- keywords_dat |>
+  group_by(keys) |>
+  filter(total_citations >= 1200) |> 
+  ggplot(aes(x = total_citations, y = keys)) +
+    geom_point()+
+  labs(x = "Total Citations", y = "Author Keywords")+ 
+  theme_clean()
+plot_cite_keys
+```
+
+#### 
+
+## 7. **Relationship Between Authorship Patterns and Research Impact in IS Research**
+
+### Tidy Dataset
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+authorship<-  pub_dat |> 
+  group_by(Title) |> 
+  mutate(author_count = (str_count(Authors, pattern = ",") + 1 ))
+```
+
+### Generate Graphs
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+plot_auth <- authorship |> 
+  ggplot(aes(x = author_count, y = cited_by, fill = author_count)) +
+  geom_col(show.legend = FALSE)+
+  theme_clean()+
+  labs(y = NULL, x = "Number of Authors") 
+
+plot_auth
+```
+
+## 8. **Tonality of IS Abstracts by Topic**
+
+### What is the average sentiment of the abstracts?
+
+### Abstract and sentiments
+
+```{r fig.height=6}
+#| echo: false
+#| warning: false
+#| message: false
+
+#get sentence level sentiment data
+sentence_level <- data |>
+  get_sentences(data$Abstract) |>
+  sentiment_by(by = "Title",
+               polarity_dt = lexicon::hash_sentiment_jockers_rinker,
+               valence_shifters_dt = lexicon::hash_valence_shifters,
+               amplifier.weight = 2,
+               n.before = 3, n.after = 3,
+               question.weight = 0,
+               neutral.nonverb.like = TRUE)
+
+#create graph
+sentence_level |>
+  ggplot(aes(x = ave_sentiment))+
+  geom_density(color = "#440d54", size = 2) +
+  labs(title = "The average sentiments across abstracts",
+       x = "Average sentiment",
+       y = "Density") +
+  theme_ipsum() +
+  theme(axis.title.x = element_text(size = 13, hjust = 0.5, margin = margin(t = 15, r = 0, b = 0, l = 0)),
+        axis.title.y = element_text(size = 13, hjust = 0.5, margin = margin(t = 0, r = 15, b = 15, l = 0)),
+        text = element_text(size = 15))
+
+```
+
+```{r fig.height=8}
+#| echo: false
+#| warning: false
+#| message: false
+
+color <- ifelse(sentence_level$ave_sentiment < 0, "#9e0142", "#66c2a5")
+
+sentence_level |>
+  group_by(Title) |>
+  ggplot(aes(x = fct_reorder(Title, ave_sentiment), y = ave_sentiment)) +
+  geom_hline(yintercept=0, linetype=4)+
+  geom_col(fill = color) +
+  labs(x = "Title", y = "Sentiment", title = "Sentiment", subtitle = "By paper")+
+  coord_flip()+
+  theme_void(base_family = "sans") +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+```
+
+#### By year
+
+```{r fig.height=15, fig.width=12}
+#| echo: false
+#| warning: false
+#| message: false
+
+plots_list <- list()
+
+#for loop to create new density graph for each year
+for (year in unique_years) {
+  year_data <- data |> 
+    filter(Year == year)
+  
+  sentence_level <- year_data |> 
+    get_sentences(year_data$Abstract) |> 
+    sentiment_by(by = "Title",
+                 polarity_dt = lexicon::hash_sentiment_jockers_rinker,
+                 valence_shifters_dt = lexicon::hash_valence_shifters,
+                 amplifier.weight = 2,
+                 n.before = 3, n.after = 3,
+                 question.weight = 0,
+                 neutral.nonverb.like = TRUE)
+  
+  plot <-sentence_level |>
+    ggplot(aes(x = ave_sentiment))+
+    geom_density(color = "#440d54", size = 2) +
+    labs(title = paste("The average sentiments for ", year),
+         x = "Average sentiment",
+         y = "Density") +
+    theme_ipsum() +
+    theme(axis.title.x = element_text(size = 13, hjust = 0.5, margin = margin(t = 15, r = 0, b = 0, l = 0)),
+          axis.title.y = element_text(size = 13, hjust = 0.5, margin = margin(t = 0, r = 15, b = 15, l = 0)),
+          text = element_text(size = 15))
+  
+  plots_list[[as.character(year)]] <- plot
+}
+
+plot_grid(plotlist = rev(plots_list), ncol = 2)
+```
+
+### Sentiment
+
+#### Average per topic
+
+```{r}
+#tidy the results of LDA
+lda_results <- tidy(lda_model_abstract, matrix = "gamma")
+
+#join afinn onto tidy df
+lda_results <- lda_results |> 
+  left_join(get_sentiments("afinn"), by = c("term" = "word")) |> 
+  na.omit()
+
+#compute average sentitment using beta
+topic_sentiment <- lda_results |> 
+  group_by(topic) |> 
+  summarise(sentiment_score = sum(gamma * value, na.rm = TRUE))
+
+topic_sentiment
+
+ggplot(topic_sentiment, aes(x = factor(topic), y = sentiment_score, fill = factor(topic))) +
+  geom_bar(stat = "identity") +
+  scale_fill_discrete(guide = FALSE) +  # Remove legend
+  labs(x = "Topic", y = "Sentiment Score", title = "Average Sentiments per Topic") +
+  theme_ipsum(base_family = "sans") +
+  theme(axis.title.x = element_text(hjust = 0.5, margin = margin(t = 15, r = 0, b = 0, l = 0)),
+        axis.title.y = element_text(hjust = 0.5, margin = margin(t = 0, r = 15, b = 15, l = 0)),
+        axis.text.x = element_text(angle = 90),
+        text = element_text(size = 12))
+```
+
+#### Proportional sentiments
+
+```{r}
+lda_results <- tidy(lda_model_abstract, matrix = "beta")
+#join nrc on df
+lda_results2 <- lda_results |> 
+  left_join(get_sentiments("nrc"), by = c("term" = "word")) |> 
+  na.omit()
+
+topic_sentiment3 <- lda_results2 |> 
+  group_by(topic) |> 
+  ggplot(aes(x = factor(topic), y = beta, fill = sentiment)) +
+  geom_bar(stat = "identity", position = position_fill())+
+  labs(x = "Topic",
+       y = NULL,
+       title = "Proportional sentiment per topic") +
+  scale_x_discrete(drop = F)+
+  theme_ipsum(base_family = "sans") +
+  theme(axis.title.x = element_text(hjust = 0.5, margin = margin(t = 15, r = 0, b = 0, l = 0)),
+        axis.title.y = element_text(hjust = 0.5, margin = margin(t = 0, r = 15, b = 15, l = 0)),
+        text = element_text(size = 12))
+topic_sentiment3
+```
+
+#### Sentiments per topic
+
+```{r fig.height=25}
+
+lda_results <- tidy(lda_model_abstract, matrix = "beta")
+get_sentiments("nrc")
+lda_results_all <- lda_results |> 
+  left_join(get_sentiments("nrc"), by = c("term" = "word")) |> 
+  left_join(get_sentiments("afinn"), by = c("sentiment" = "word")) |>  
+  na.omit()
+
+sent_topics <- c(1:10)
+sent_plots <- list()
+  
+#for loop to create new bar chart per topic
+for (sent_topic in sent_topics) {
+  sent_count_per_topic <- lda_results_all |> 
+    filter(topic == sent_topic) |> 
+    count(sentiment)
+  sent_score <- lda_results_all |> 
+    filter(topic == sent_topic) |> 
+    mutate(score = beta * value) |> 
+    group_by(sentiment) |> 
+    summarise(total_score = sum(score)) |> 
+    left_join(lda_topic1) |> 
+    group_by(sentiment) |> 
+    summarise(final_score = total_score * n)
+  
+  plot <- ggplot(sent_score, aes(x = sentiment, y = final_score, fill = sentiment)) +
+    geom_bar(stat = "identity", show.legend = F) +
+    labs(x = "Topic",
+         y = "Sentiment Score",
+         title = paste("Sentiment score per topic ", sent_topic))+
+    theme_ipsum(base_family = "sans") +
+    theme(axis.title.x = element_text(hjust = 0.5, 
+                                      margin = margin(t = 15, r = 0, b = 0, l = 0)),
+        axis.title.y = element_text(hjust = 0.5, 
+                                    margin = margin(t = 0, r = 15, b = 15, l = 0)),
+        text = element_text(size = 12),
+        axis.text.x = element_text(angle = 90))
+  
+  sent_plots[[length(sent_plots)+1]] <- plot
+    
+  
+}
+plot_grid(plotlist = sent_plots, ncol = 2)
+```
